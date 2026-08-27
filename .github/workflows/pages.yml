@@ -2,7 +2,7 @@ name: Deploy Web (GitHub Pages)
 
 on:
   push:
-    branches: [main, "claude/star-citizen-app-rav7fb"]
+    branches: [main]
     paths:
       - "web/**"
       - ".github/workflows/pages.yml"
