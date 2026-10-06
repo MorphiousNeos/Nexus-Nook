@@ -50,4 +50,4 @@ jobs:
           done
           # Don't fail the run: a transient blip would otherwise send a failure
           # notification every ten minutes. The log still records what happened.
-          echo "::warning::API did not return 200 after 3 attempts."
+          echo "::error::API did not return 200 after 3 attempts."; exit 1
