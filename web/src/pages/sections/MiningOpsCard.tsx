@@ -4,8 +4,8 @@ import { ActionModule, DataModule } from '../../components/modules'
 import {
   ACTIVITY_LABEL,
   closedOps,
+  onByYou,
   openOps,
-  ownedBy,
 } from '../../services/miningInsights'
 import {
   addSharedOpsEntry,
@@ -29,36 +29,37 @@ function formatAuec(n: number): string {
   return `${Math.round(n).toLocaleString()} aUEC`
 }
 
-function computePayouts(detail: SharedOpsDetail) {
-  const net = detail.entries.reduce((sum, e) => sum + e.amount, 0)
-  const totalShares = detail.crew.reduce((sum, c) => sum + Math.max(0, c.shares), 0)
-  const payouts = detail.crew.map((c) => ({
-    ...c,
-    payout: totalShares > 0 ? (Math.max(0, c.shares) / totalShares) * net : 0,
-  }))
-  return { net, payouts }
-}
-
+/**
+ * The Discord-ready payout summary.
+ *
+ * Every figure here comes from the server. The client used to divide the net
+ * itself, which meant two crew members on different devices could paste
+ * different numbers into the same channel — and nothing about the arithmetic
+ * could be tested. The split now lives in backend/lib/opsSplit.js, where it is.
+ */
 function buildSummary(detail: SharedOpsDetail): string {
-  const { net, payouts } = computePayouts(detail)
-  return [
+  const lines = [
     `**${detail.name}** — ${detail.activity} op payout`,
-    `Net: ${formatAuec(net)}`,
+    `Net: ${formatAuec(detail.net)}`,
     '',
-    ...payouts.map((p) => `${p.name} (${p.shares}×): ${formatAuec(p.payout)}`),
-    '',
-    '— split with Nexus Nook',
-  ].join('\n')
+    ...detail.payouts.map((p) => `${p.name} (${p.shares}×): ${formatAuec(p.payout)}`),
+  ]
+  if (detail.unallocated !== 0) {
+    lines.push('', `Unsplit (nobody holds a share): ${formatAuec(detail.unallocated)}`)
+  }
+  lines.push('', '— split with Nexus Nook')
+  return lines.join('\n')
 }
 
 function SessionDetail({
   sessionId,
-  me,
+  myId,
   onBack,
   onChanged,
 }: {
   sessionId: string
-  me: string
+  /** The signed-in player's user id, or '' when signed out. */
+  myId: string
   onBack: () => void
   onChanged: () => void
 }) {
@@ -149,9 +150,11 @@ function SessionDetail({
     )
   }
 
-  const isOwner = !!me && detail.owner === me
-  const isCrew = !!me && detail.crew.some((c) => c.name === me)
-  const { net, payouts } = computePayouts(detail)
+  // By user id, not display name: a rename used to silently strip the owner of
+  // their own controls, and two players sharing a name each saw the other's.
+  const isOwner = !!myId && detail.ownerId === myId
+  const isCrew = !!myId && detail.crew.some((c) => c.userId === myId)
+  const { net, payouts, unallocated } = detail
 
   return (
     <div className="space-y-4">
@@ -182,7 +185,7 @@ function SessionDetail({
           {!isCrew && !detail.closed && (
             <Button
               onClick={() => run(() => joinSharedOps(detail.id), 'Could not join.')}
-              disabled={busy || !me}
+              disabled={busy || !myId}
             >
               {busy ? 'Working…' : 'Join crew'}
             </Button>
@@ -222,7 +225,7 @@ function SessionDetail({
               </Button>
             </>
           )}
-          {!me && <span className="text-xs text-hull-500">Sign in to join.</span>}
+          {!myId && <span className="text-xs text-hull-500">Sign in to join.</span>}
         </div>
         {actionError && <p className="mt-2 text-sm text-caution-300">{actionError}</p>}
       </div>
@@ -237,7 +240,7 @@ function SessionDetail({
             <li key={c.userId} className="flex items-center justify-between gap-2 text-sm">
               <span className="min-w-0 truncate text-hull-200">
                 {c.name}
-                {c.name === detail.owner && (
+                {c.userId === detail.ownerId && (
                   <span className="ml-1.5 text-[10px] uppercase text-brand-300">owner</span>
                 )}
               </span>
@@ -295,7 +298,7 @@ function SessionDetail({
         ) : (
           <ul className="mt-2 space-y-1">
             {detail.entries.map((e) => {
-              const canDelete = isOwner || (!!me && e.author === me)
+              const canDelete = isOwner || (!!myId && e.authorId === myId)
               return (
                 <li key={e.id} className="flex items-center justify-between gap-2 text-sm">
                   <span className="min-w-0 truncate text-hull-300">
@@ -392,6 +395,12 @@ function SessionDetail({
             </li>
           ))}
         </ul>
+        {unallocated !== 0 && (
+          <p className="mt-2 text-xs text-caution-300">
+            {formatAuec(unallocated)} is unsplit — nobody on the crew holds a share.
+            Give someone a share to divide it.
+          </p>
+        )}
         <Button
           variant="ghost"
           className="mt-3"
@@ -409,17 +418,24 @@ function SessionDetail({
  * The ops board.
  *
  * The session list is fetched by the page and passed in, so the briefing above
- * and the board below are always the same data. Everything else — creating an
- * op, opening one, the crew and ledger detail — is unchanged.
+ * and the board below are always the same data.
+ *
+ * `myOps` is a second, server-filtered list of the ops this player is on. It
+ * exists because `sessions` is the public board, capped at 100 rows: an op you
+ * joined can fall off it as other players start theirs, and before this the op
+ * simply vanished from your view. Your own ops are therefore never derived by
+ * filtering the board.
  */
 export default function MiningOpsCard({
-  me,
+  myId,
+  myOps,
   sessions,
   loading,
   error,
   onRefresh,
 }: {
-  me: string
+  myId: string
+  myOps: SharedOpsSummary[] | null
   sessions: SharedOpsSummary[]
   loading: boolean
   error: string | null
@@ -439,7 +455,7 @@ export default function MiningOpsCard({
       <DataModule title="Session detail">
         <SessionDetail
           sessionId={selectedId}
-          me={me}
+          myId={myId}
           onBack={() => setSelectedId(null)}
           onChanged={onRefresh}
         />
@@ -466,11 +482,16 @@ export default function MiningOpsCard({
     }
   }
 
-  const yours = ownedBy(sessions, me)
+  // Prefer the server's answer about which ops are yours; fall back to reading
+  // it off the board only when signed out or the request failed.
+  const yours = myOps ?? onByYou(sessions, myId)
   const yoursOpen = openOps(yours)
   // The board minus your own open ops, so nothing appears twice on the page.
   const others = openOps(sessions).filter((s) => !yoursOpen.some((y) => y.id === s.id))
-  const closed = closedOps(sessions)
+  // Closed ops from both lists: one of yours may have aged off the public board.
+  const closed = [...closedOps(yours), ...closedOps(sessions)].filter(
+    (s, i, all) => all.findIndex((o) => o.id === s.id) === i,
+  )
 
   function renderRow(s: SharedOpsSummary) {
     return (
@@ -540,7 +561,7 @@ export default function MiningOpsCard({
       )}
 
       {!error && yoursOpen.length > 0 && (
-        <DataModule title="Your open ops" description="Ops you started.">
+        <DataModule title="Your open ops" description="Ops you started, and ops you crew.">
           <ul className="-mx-3 space-y-1">{yoursOpen.map(renderRow)}</ul>
         </DataModule>
       )}

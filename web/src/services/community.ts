@@ -445,6 +445,10 @@ export interface SharedOpsSummary {
   closed: boolean
   createdAt: string
   owner: string
+  /** Owner's user id. The reliable ownership test — display names change. */
+  ownerId: string
+  /** True when the signed-in caller is on this op's crew. Server-supplied. */
+  isCrew: boolean
   crewCount: number
   net: number
 }
@@ -461,6 +465,17 @@ export interface SharedOpsEntry {
   amount: number
   createdAt: string
   author: string
+  /** Author's user id. '' when the author deleted their account. */
+  authorId: string
+}
+
+/** One crew member's cut, as computed by the server. */
+export interface SharedOpsPayout {
+  userId: string
+  name: string
+  shares: number
+  /** Whole aUEC. Negative when the op ran at a loss. */
+  payout: number
 }
 
 export interface SharedOpsDetail {
@@ -470,8 +485,19 @@ export interface SharedOpsDetail {
   closed: boolean
   createdAt: string
   owner: string
+  ownerId: string
   crew: SharedOpsCrew[]
   entries: SharedOpsEntry[]
+  /** Ledger total in aUEC, from the server. */
+  net: number
+  totalShares: number
+  /**
+   * aUEC the server could not divide — only ever non-zero when the whole crew
+   * sits at zero shares. Surfaced rather than silently dropped.
+   */
+  unallocated: number
+  /** Per-member cuts. The client does not compute these; it renders them. */
+  payouts: SharedOpsPayout[]
 }
 
 function mapOpsActivity(raw: unknown): SharedOpsActivity {
@@ -489,13 +515,26 @@ function mapOpsSummary(raw: unknown): SharedOpsSummary {
     closed: r.closed === true || r.closed === 't',
     createdAt: toStr(r.created_at ?? r.createdAt),
     owner: toStr(r.owner),
+    ownerId: toStr(r.owner_id ?? r.ownerId),
+    isCrew: r.is_crew === true || r.is_crew === 't',
     crewCount: toOptNum(r.crew_count ?? r.crewCount) ?? 0,
     net: toOptNum(r.net) ?? 0,
   }
 }
 
-export async function listSharedOps(): Promise<SharedOpsSummary[]> {
-  const data = await request<{ sessions?: unknown[] }>('/api/ops')
+/**
+ * List ops.
+ *
+ * `mine` asks the server for only the ops you own or crew. Filtering the
+ * public board client-side is not an alternative: the board is capped at 100
+ * rows, so an op you joined can fall off it entirely.
+ */
+export async function listSharedOps(
+  options: { mine?: boolean } = {},
+): Promise<SharedOpsSummary[]> {
+  const data = await request<{ sessions?: unknown[] }>(
+    options.mine ? '/api/ops?mine=1' : '/api/ops',
+  )
   return (data.sessions ?? []).map(mapOpsSummary)
 }
 
@@ -515,6 +554,7 @@ export async function getSharedOps(id: string): Promise<SharedOpsDetail> {
   const s = (data.session ?? {}) as Record<string, unknown>
   const crew = Array.isArray(data.crew) ? data.crew : []
   const entries = Array.isArray(data.entries) ? data.entries : []
+  const payouts = Array.isArray(data.payouts) ? data.payouts : []
   return {
     id: toStr(s.id),
     name: toStr(s.name),
@@ -522,6 +562,19 @@ export async function getSharedOps(id: string): Promise<SharedOpsDetail> {
     closed: s.closed === true || s.closed === 't',
     createdAt: toStr(s.created_at),
     owner: toStr(s.owner),
+    ownerId: toStr(s.owner_id ?? s.ownerId),
+    net: toOptNum(data.net) ?? 0,
+    totalShares: toOptNum(data.totalShares) ?? 0,
+    unallocated: toOptNum(data.unallocated) ?? 0,
+    payouts: payouts.map((p) => {
+      const r = (p ?? {}) as Record<string, unknown>
+      return {
+        userId: toStr(r.userId ?? r.user_id),
+        name: toStr(r.name),
+        shares: toOptNum(r.shares) ?? 0,
+        payout: toOptNum(r.payout) ?? 0,
+      }
+    }),
     crew: crew.map((c) => {
       const r = (c ?? {}) as Record<string, unknown>
       return {
@@ -538,6 +591,7 @@ export async function getSharedOps(id: string): Promise<SharedOpsDetail> {
         amount: toOptNum(r.amount) ?? 0,
         createdAt: toStr(r.created_at ?? r.createdAt),
         author: toStr(r.author),
+        authorId: toStr(r.author_id ?? r.authorId),
       }
     }),
   }

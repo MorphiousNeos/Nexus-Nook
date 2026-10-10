@@ -22,15 +22,20 @@ import { miningAlerts, opsBoard } from '../../services/miningInsights'
  * board are the same fetch — two requests could disagree with each other on
  * screen at the same moment.
  *
- * Every personal figure is scoped to ops this player owns. The ops endpoint
- * returns the whole community board, so an unscoped count would describe
- * everyone's activity while looking like a report on yours.
+ * Two lists, deliberately. `sessions` is the public community board. `myOps`
+ * is the server's own answer to "which ops am I on" — ops this player started
+ * and ops they crew. The board is capped at 100 rows, so filtering it was never
+ * a sound way to find your own ops: a busy board could hide the op you joined.
+ *
+ * Every personal figure is scoped to `myOps`, by user id rather than display
+ * name, so a rename cannot detach a player from their own work.
  */
 export default function MiningPage() {
   const { state } = useSession()
-  const me = state?.profile?.displayName ?? ''
+  const myId = state?.profile?.id ? String(state.profile.id) : ''
 
   const [sessions, setSessions] = useState<SharedOpsSummary[]>([])
+  const [myOps, setMyOps] = useState<SharedOpsSummary[] | null>(null)
   const [loading, setLoading] = useState(communityAvailable)
   const [error, setError] = useState<string | null>(null)
 
@@ -38,13 +43,20 @@ export default function MiningPage() {
     setLoading(true)
     setError(null)
     try {
-      setSessions(await listSharedOps())
+      // Both in flight together: the board and your ops are separate views of
+      // the same moment, and two sequential fetches would show a gap.
+      const [board, mine] = await Promise.all([
+        listSharedOps(),
+        myId ? listSharedOps({ mine: true }) : Promise.resolve(null),
+      ])
+      setSessions(board)
+      setMyOps(mine)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load sessions.')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [myId])
 
   useEffect(() => {
     if (!communityAvailable) {
@@ -54,8 +66,9 @@ export default function MiningPage() {
     void refresh()
   }, [refresh])
 
-  const board = useMemo(() => opsBoard(sessions, me), [sessions, me])
-  const alerts = useMemo(() => miningAlerts(sessions, me), [sessions, me])
+  const board = useMemo(() => opsBoard(sessions, myId, myOps), [sessions, myId, myOps])
+  // Alerts are owner-scoped, and your own ops are the authoritative source.
+  const alerts = useMemo(() => miningAlerts(myOps ?? sessions, myId), [myOps, sessions, myId])
 
   const stats: SummaryStat[] = [
     {
@@ -108,7 +121,7 @@ export default function MiningPage() {
     : error
       ? 'The board could not be reached. Your ops are safe on the server — try again in a moment.'
       : board.yoursOpen.length > 0
-        ? 'Open one to log the take, set crew shares, and copy a payout summary.'
+        ? 'Open one to log the take and see what each of you is owed.'
         : board.boardOpenCount > 0
           ? 'These are open crews from across the community. Join one, or start your own.'
           : 'Start an op and your crew can join it from their own devices.'
@@ -138,7 +151,8 @@ export default function MiningPage() {
       )}
 
       <MiningOpsCard
-        me={me}
+        myId={myId}
+        myOps={myOps}
         sessions={sessions}
         loading={loading}
         error={error}

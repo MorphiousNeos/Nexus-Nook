@@ -17,7 +17,7 @@ import {
   listSharedOps,
   type SharedOpsSummary,
 } from '../../services/community'
-import { ACTIVITY_LABEL, openOps, ownedBy } from '../../services/miningInsights'
+import { ACTIVITY_LABEL, openOps } from '../../services/miningInsights'
 import { relativeTime } from '../../services/community'
 import { readiness } from '../../services/fleetInsights'
 import {
@@ -320,16 +320,21 @@ export default function OverviewPage() {
 
   // Ops live on the server, not in session state. Same posture as the shard
   // tile: fetch on mount, and on failure show nothing rather than a wrong zero.
+  //
+  // We ask the server for *our* ops rather than filtering the public board:
+  // the board is capped at 100 rows, so a busy board used to hide a player's
+  // own op from their briefing.
+  const myUserId = state?.profile?.id ? String(state.profile.id) : ''
   useEffect(() => {
-    if (!communityAvailable) return
+    if (!communityAvailable || !myUserId) return
     let active = true
-    listSharedOps()
+    listSharedOps({ mine: true })
       .then((rows) => active && setOps(rows))
       .catch(() => active && setOps(null))
     return () => {
       active = false
     }
-  }, [])
+  }, [myUserId])
 
   const view = useMemo(() => {
     const fleet = Array.isArray(state?.fleet) ? state!.fleet : []
@@ -346,11 +351,9 @@ export default function OverviewPage() {
 
   const onlineCount = servers?.filter((s) => s.status === 'online').length ?? 0
 
-  // Only ops this player owns. The ops endpoint returns the whole community
-  // board, so an unscoped count would report everyone's activity as if it were
-  // theirs. Ops merely joined are not identifiable from the list at all.
-  const me = state?.profile?.displayName ?? ''
-  const myOps = ops ? openOps(ownedBy(ops, me)) : []
+  // `ops` is already scoped to this player by the server — ops they started
+  // and ops they crew — so nothing here needs to guess from display names.
+  const myOps = ops ? openOps(ops) : []
   const inFlightCount = flight.count + myOps.length
 
   const stats: SummaryStat[] = [
@@ -517,7 +520,7 @@ export default function OverviewPage() {
             {myOps.length > 0 && (
               <DataModule
                 title="Your open ops"
-                description="Ops you started. Open one to log the take and split payouts."
+                description="Ops you're on. Open one to log the take and see the split."
                 action={
                   <Link
                     to="/mining"
