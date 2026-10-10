@@ -13,6 +13,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const Redis = require('ioredis');
+const { computeOpsPayouts } = require('./lib/opsSplit');
 require('dotenv').config();
 
 const app = express();
@@ -67,6 +68,21 @@ const authenticateToken = (req, res, next) => {
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
     req.user = user;
+    next();
+  });
+};
+
+// For endpoints that are public but tell a signed-in caller more than an
+// anonymous one — the ops board names which sessions are yours. A bad or
+// expired token is treated as no token rather than an error, so the public
+// view keeps working for someone whose session has lapsed.
+const optionalAuth = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return next();
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (!err) req.user = user;
     next();
   });
 };
@@ -687,17 +703,53 @@ app.get('/api/servers/status', async (req, res) => {
 // crew, and crew members log the shared ledger together. The owner adjusts
 // share weights and closes the session.
 
-// List sessions (public), newest first, with owner/crew/net rollups.
-app.get('/api/ops', async (req, res) => {
+// List sessions, newest first, with owner/crew/net rollups.
+//
+// Two views from one route:
+//   GET /api/ops          the public community board (no auth needed)
+//   GET /api/ops?mine=1   only sessions the caller owns or crews (auth needed)
+//
+// The second exists because the board is capped at 100 rows. Without it, a
+// player who joined someone else's op had no way to find it again once the
+// board moved on — and crew membership is not visible in the board rows at all.
+// Every row now carries `owner_id`, and a signed-in caller also gets `is_crew`,
+// so clients can tell whose op it is without comparing display names.
+app.get('/api/ops', optionalAuth, async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT s.id, s.name, s.activity, s.closed, s.created_at,
+    const mine = req.query.mine === '1' || req.query.mine === 'true';
+    if (mine && !req.user) {
+      return res.status(401).json({ error: 'Sign in to see your own ops' });
+    }
+
+    const viewerId = req.user?.userId ?? null;
+    const selectColumns = `s.id, s.name, s.activity, s.closed, s.created_at, s.owner_id,
               u.username AS owner,
               (SELECT COUNT(*) FROM shared_ops_crew c WHERE c.session_id = s.id) AS crew_count,
-              (SELECT COALESCE(SUM(e.amount), 0) FROM shared_ops_entries e WHERE e.session_id = s.id) AS net
-       FROM shared_ops_sessions s JOIN users u ON u.id = s.owner_id
-       ORDER BY s.closed ASC, s.created_at DESC LIMIT 100`
-    );
+              (SELECT COALESCE(SUM(e.amount), 0) FROM shared_ops_entries e WHERE e.session_id = s.id) AS net,
+              ($1::int IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM shared_ops_crew c
+                 WHERE c.session_id = s.id AND c.user_id = $1
+               )) AS is_crew`;
+
+    // "Mine" means ops I started *or* ops I am crewing — both are ops I am on.
+    const result = mine
+      ? await pool.query(
+          `SELECT ${selectColumns}
+           FROM shared_ops_sessions s JOIN users u ON u.id = s.owner_id
+           WHERE s.owner_id = $1 OR EXISTS (
+             SELECT 1 FROM shared_ops_crew c
+             WHERE c.session_id = s.id AND c.user_id = $1
+           )
+           ORDER BY s.closed ASC, s.created_at DESC LIMIT 100`,
+          [viewerId]
+        )
+      : await pool.query(
+          `SELECT ${selectColumns}
+           FROM shared_ops_sessions s JOIN users u ON u.id = s.owner_id
+           ORDER BY s.closed ASC, s.created_at DESC LIMIT 100`,
+          [viewerId]
+        );
+
     res.json({ sessions: result.rows });
   } catch (error) {
     console.error('Ops list error:', error);
@@ -754,12 +806,31 @@ app.get('/api/ops/:id', async (req, res) => {
       [req.params.id]
     );
     const entries = await pool.query(
-      `SELECT e.id, e.label, e.amount, e.created_at, u.username AS author
+      `SELECT e.id, e.label, e.amount, e.created_at, e.user_id AS author_id,
+              u.username AS author
        FROM shared_ops_entries e LEFT JOIN users u ON u.id = e.user_id
        WHERE e.session_id = $1 ORDER BY e.created_at ASC LIMIT 500`,
       [req.params.id]
     );
-    res.json({ session: sessionResult.rows[0], crew: crew.rows, entries: entries.rows });
+
+    // The split is computed here, once, rather than in each client. Two crew
+    // members looking at the same op on different devices must not be able to
+    // arrive at different numbers, and a split nobody can test is a split
+    // nobody should trust. See lib/opsSplit.js for the rounding rules.
+    const { net, totalShares, unallocated, payouts } = computeOpsPayouts(
+      crew.rows,
+      entries.rows
+    );
+
+    res.json({
+      session: sessionResult.rows[0],
+      crew: crew.rows,
+      entries: entries.rows,
+      net,
+      totalShares,
+      unallocated,
+      payouts,
+    });
   } catch (error) {
     console.error('Ops detail error:', error);
     res.status(500).json({ error: 'Failed to load session' });
