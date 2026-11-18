@@ -56,7 +56,7 @@ Copy `.env.example` to `.env.local` and fill in what you need:
 
 ## Deployment (GitHub Pages)
 
-The app is configured for GitHub Pages at base path `/Nexus-Nook-mock-api/`
+The app is configured for GitHub Pages at base path `/Nexus-Nook/`
 (`base` in `vite.config.ts`). It uses a `HashRouter`, so deep links work without any
 server rewrite config. A `public/404.html` is included as a safety net.
 
