@@ -572,3 +572,11 @@ body {
     animation: none;
   }
 }
+
+/* Ships fly the margins, not the copy. Traffic fades out across the middle of
+   the hero, where the headline and the sign-in card sit, so nothing crosses the
+   text or the form. */
+.nn-edge-only {
+  -webkit-mask-image: radial-gradient(ellipse 62% 58% at 50% 46%, transparent 55%, #000 92%);
+  mask-image: radial-gradient(ellipse 62% 58% at 50% 46%, transparent 55%, #000 92%);
+}
