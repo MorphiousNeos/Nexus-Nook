@@ -30,7 +30,37 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-const redis = new Redis(process.env.REDIS_URL);
+// Redis is an optional cache. Every caller has an in-memory fallback, so the
+// client must fail fast instead of queueing commands while it retries. With
+// ioredis defaults, a missing or unreachable Redis held each command for
+// ~10-20s before the fallback ran, which made Discord sign-in hang on both the
+// way out and the way back. With no REDIS_URL at all we skip the connection
+// entirely rather than retrying localhost forever.
+function createRedis() {
+  if (!process.env.REDIS_URL) {
+    console.warn('REDIS_URL not set: running with in-memory fallbacks only.');
+    const unavailable = () => Promise.reject(new Error('Redis not configured'));
+    return new Proxy({}, { get: () => unavailable });
+  }
+  const client = new Redis(process.env.REDIS_URL, {
+    enableOfflineQueue: false,
+    maxRetriesPerRequest: 1,
+    connectTimeout: 5000,
+    retryStrategy: (times) => Math.min(times * 1000, 30000),
+  });
+  let warned = false;
+  client.on('error', (err) => {
+    if (warned) return;
+    warned = true;
+    console.warn('Redis unavailable, using in-memory fallbacks:', err.code || err.message);
+  });
+  client.on('ready', () => {
+    warned = false;
+    console.log('Redis connected');
+  });
+  return client;
+}
+const redis = createRedis();
 
 // =============================================================================
 // MIDDLEWARE
@@ -127,7 +157,7 @@ class RSIApiClient {
 
   async fetchProfile(token) {
     const cacheKey = `rsi:profile:${token}`;
-    const cached = await redis.get(cacheKey);
+    const cached = await redis.get(cacheKey).catch(() => null);
     if (cached) {
       return JSON.parse(cached);
     }
@@ -136,7 +166,7 @@ class RSIApiClient {
 
   async fetchHangar(handle) {
     const cacheKey = `rsi:hangar:${handle}`;
-    const cached = await redis.get(cacheKey);
+    const cached = await redis.get(cacheKey).catch(() => null);
     if (cached) {
       return JSON.parse(cached);
     }
