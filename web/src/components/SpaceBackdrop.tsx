@@ -556,7 +556,7 @@ export default function SpaceBackdrop() {
         <div className="nn-planet" />
       </div>
 
-      <div className="nn-plx nn-plx-mid absolute inset-0">
+      <div className="nn-plx nn-plx-mid nn-edge-only absolute inset-0">
         {!use3D && (
           <>
             <div className="nn-ship nn-ship-2">
@@ -572,11 +572,13 @@ export default function SpaceBackdrop() {
       </div>
 
       {use3D ? (
-        <Suspense fallback={null}>
-          <ShipScene3D />
-        </Suspense>
+        <div className="nn-edge-only absolute inset-0">
+          <Suspense fallback={null}>
+            <ShipScene3D />
+          </Suspense>
+        </div>
       ) : (
-        <div className="nn-plx nn-plx-near absolute inset-0">
+        <div className="nn-plx nn-plx-near nn-edge-only absolute inset-0">
           <div className="nn-ship nn-ship-1">
             <InterceptorSvg className="nn-bloom-cyan h-14 w-48 opacity-95 sm:h-16 sm:w-56" />
           </div>
